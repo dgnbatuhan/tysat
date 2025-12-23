@@ -22,7 +22,7 @@ def get_auth_header():
 @st.cache_data(ttl=10)
 def fetch_orders(status):
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=15) # Aralığı biraz genişlettik
+    start_dt = end_dt - timedelta(days=5) # Aralığı biraz genişlettik
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
     params = {
         "status": status,
