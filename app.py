@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Trendyol Detaylı Paketleme", layout="wide")
 
 # --- API Bilgileri ---
-SELLER_ID = "1102650"
-API_KEY = "UHoCiK2feRjWlU53301n"
-API_SECRET = "gVoRn4hV6GtzVo678k4q"
+SELLER_ID = st.secrets["SELLER_ID"]
+API_KEY = st.secrets["API_KEY"]
+API_SECRET = st.secrets["API_SECRET"]
 
 def get_auth_header():
     auth_str = f"{API_KEY}:{API_SECRET}"
