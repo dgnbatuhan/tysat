@@ -4,100 +4,99 @@ import base64
 import pandas as pd
 from datetime import datetime, timedelta
 
-# -------------------------------------------------
-# SAYFA AYARLARI
-# -------------------------------------------------
-st.set_page_config(
-    page_title="Trendyol Sipariş Paneli",
-    layout="wide"
-)
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="Trendyol Sipariş Paneli", layout="wide")
 
-# -------------------------------------------------
-# API BİLGİLERİ (Streamlit Secrets)
-# -------------------------------------------------
+# --- API BİLGİLERİ ---
 SELLER_ID = st.secrets["SELLER_ID"]
 API_KEY = st.secrets["API_KEY"]
 API_SECRET = st.secrets["API_SECRET"]
 
-# -------------------------------------------------
-# AUTH HEADER
-# -------------------------------------------------
+# --- AUTH HEADER ---
 def get_auth_header():
     auth_str = f"{API_KEY}:{API_SECRET}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
-    return {
-        "Authorization": f"Basic {encoded_auth}",
-        "User-Agent": f"{SELLER_ID}-Integration"
-    }
+    return {"Authorization": f"Basic {encoded_auth}", "User-Agent": f"{SELLER_ID}-Integration"}
 
-# -------------------------------------------------
-# SİPARİŞ ÇEKME FONKSİYONU
-# -------------------------------------------------
+# --- SİPARİŞ ÇEKME ---
 @st.cache_data(ttl=10)
 def fetch_orders(status):
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=5)
-
+    start_dt = end_dt - timedelta(days=15) # Aralığı biraz genişlettik
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
-
     params = {
         "status": status,
         "startDate": int(start_dt.timestamp() * 1000),
         "endDate": int(end_dt.timestamp() * 1000),
         "size": 200
     }
-
     try:
         response = requests.get(url, headers=get_auth_header(), params=params)
-        if response.status_code == 200:
-            return response.json().get("content", [])
-        return []
+        return response.json().get("content", []) if response.status_code == 200 else []
     except:
         return []
 
-# -------------------------------------------------
-# BAŞLIK
-# -------------------------------------------------
+# --- SESSION STATE (Hazır Paket Takibi İçin) ---
+if "ready_packages" not in st.session_state:
+    st.session_state.ready_packages = []
+
+# --- SIDEBAR (HAZIR PAKETLER LİSTESİ) ---
+with st.sidebar:
+    st.header("✅ Hazır Paketler")
+    if st.session_state.ready_packages:
+        for p in st.session_state.ready_packages:
+            st.success(f"📦 {p}")
+        if st.button("🗑️ Listeyi Temizle"):
+            st.session_state.ready_packages = []
+            st.rerun()
+    else:
+        st.info("Henüz işaretlenmiş paket yok.")
+    
+    st.divider()
+    if st.button("🔄 Verileri Yenile", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# --- ANA BAŞLIK ---
 st.title("📦 Trendyol Sipariş Yönetim Paneli")
 
-# -------------------------------------------------
-# SEKME YAPISI
-# -------------------------------------------------
-tab_new, tab_processing = st.tabs([
-    "🆕 Yeni Gelen Siparişler",
-    "🛠️ İşleme Alınanlar"
-])
+tab_new, tab_processing = st.tabs(["🆕 Yeni Gelenler (Özet)", "🛠️ İşleme Alınanlar"])
 
 # -------------------------------------------------
-# YENİ GELENLER (CREATED)
+# 1. SEKME: YENİ GELENLER (ÖZET GÖRÜNÜM)
 # -------------------------------------------------
 with tab_new:
     new_orders = fetch_orders("Created")
-    st.subheader(f"🆕 Yeni Gelen Siparişler ({len(new_orders)})")
-
     if new_orders:
-        for order in new_orders:
-            customer = f"{order.get('shipmentAddress', {}).get('firstName','')} {order.get('shipmentAddress', {}).get('lastName','')}"
-            order_no = order.get("orderNumber")
-
+        new_list = []
+        for o in new_orders:
+            for l in o.get("lines", []):
+                new_list.append({
+                    "Ürün": l.get("productName"),
+                    "Barkod": l.get("barcode"),
+                    "Adet": l.get("quantity")
+                })
+        
+        df_new = pd.DataFrame(new_list)
+        summary_new = df_new.groupby(["Ürün", "Barkod"]).agg(Toplam=("Adet", "sum"), Siparis_Sayisi=("Adet", "count")).reset_index()
+        
+        st.subheader(f"📢 Toplam {summary_new['Toplam'].sum()} Ürün Bekliyor")
+        
+        for _, row in summary_new.iterrows():
             with st.container(border=True):
-                st.markdown(f"### 👤 {customer}")
-                st.write(f"🧾 Sipariş No: `{order_no}`")
-
-                for line in order.get("lines", []):
-                    st.write(
-                        f"• **{line.get('quantity')} x {line.get('productName')}**  "
-                        f"(Barkod: `{line.get('barcode')}`)"
-                    )
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"**{row['Ürün']}**")
+                c1.caption(f"Barkod: {row['Barkod']}")
+                c2.subheader(f"{row['Toplam']} Adet")
     else:
         st.info("Yeni gelen sipariş yok.")
 
 # -------------------------------------------------
-# İŞLEME ALINANLAR (PICKING + INVOICED)
+# 2. SEKME: İŞLEME ALINANLAR (DETAY + CHECKBOX)
 # -------------------------------------------------
 with tab_processing:
     orders = fetch_orders("Picking,Invoiced")
-    st.subheader(f"🛠️ İşleme Alınan Siparişler ({len(orders)})")
+    st.subheader(f"🛠️ Paketlenecek Siparişler ({len(orders)})")
 
     if orders:
         single_items = []
@@ -107,49 +106,51 @@ with tab_processing:
             customer = f"{order.get('shipmentAddress', {}).get('firstName','')} {order.get('shipmentAddress', {}).get('lastName','')}"
             lines = order.get("lines", [])
             status = order.get("status")
-
             badge = "🔵 Hazırlanıyor" if status == "Picking" else "🟢 Faturalandı"
-            total_qty = sum(item.get("quantity") for item in lines)
-
+            
             if len(lines) == 1:
                 line = lines[0]
                 single_items.append({
                     "Ürün": line.get("productName"),
                     "Barkod": line.get("barcode"),
                     "Adet": line.get("quantity"),
-                    "Detay": f"👤 {customer} - {line.get('quantity')} adet ({badge})"
+                    "Müşteri": customer,
+                    "Statü": badge
                 })
             else:
-                package_summary = " + ".join(
-                    [f"{i.get('quantity')} adet {i.get('productName')}" for i in lines]
-                )
+                package_summary = " + ".join([f"{i.get('quantity')} x {i.get('productName')}" for i in lines])
                 multi_items.append({
                     "Müşteri": customer,
                     "İçerik": package_summary,
-                    "Toplam": total_qty,
                     "Durum": badge
                 })
 
         col1, col2 = st.columns(2)
 
-        # TEK ÜRÜNLER
+        # --- TEKLİ ÜRÜNLER (GRUPLU) ---
         with col1:
-            st.header("🛒 Tek Çeşit Ürünler")
+            st.header("🛒 Tekli Paketler")
             if single_items:
-                df = pd.DataFrame(single_items)
-                summary = df.groupby(["Ürün", "Barkod"]).agg(
-                    Toplam_Adet=("Adet", "sum"),
-                    Liste=("Detay", lambda x: "\n".join(x))
+                df_p = pd.DataFrame(single_items)
+                summary_p = df_p.groupby(["Ürün", "Barkod"]).agg(
+                    Toplam=("Adet", "sum"),
+                    Detaylar=("Müşteri", list),
+                    Adetler=("Adet", list)
                 ).reset_index()
 
-                for _, row in summary.iterrows():
-                    with st.expander(f"📦 {row['Toplam_Adet']} ADET - {row['Ürün']}"):
-                        st.write(f"**Barkod:** `{row['Barkod']}`")
-                        st.text(row["Liste"])
+                for _, row in summary_p.iterrows():
+                    with st.expander(f"📦 {row['Toplam']} Adet - {row['Ürün']}"):
+                        st.caption(f"Barkod: {row['Barkod']}")
+                        for m, a in zip(row['Detaylar'], row['Adetler']):
+                            label = f"{m} ({a} Adet)"
+                            # Checkbox ile hazır paket takibi
+                            is_ready = st.checkbox(label, key=f"check_{m}_{row['Barkod']}")
+                            if is_ready and label not in st.session_state.ready_packages:
+                                st.session_state.ready_packages.append(label)
             else:
-                st.info("Tekli ürün yok.")
+                st.info("Tekli paket yok.")
 
-        # KARMA PAKETLER
+        # --- KARMA PAKETLER ---
         with col2:
             st.header("🎁 Karma Paketler")
             if multi_items:
@@ -157,17 +158,13 @@ with tab_processing:
                     with st.container(border=True):
                         st.subheader(item["Müşteri"])
                         st.write(item["Durum"])
-                        st.write(f"📝 {item['İçerik']}")
-                        st.write(f"🔢 Toplam: {item['Toplam']} ürün")
+                        st.info(f"📝 {item['İçerik']}")
+                        
+                        label_multi = f"{item['Müşteri']} (Karma)"
+                        is_ready_m = st.checkbox("Paket Hazır", key=f"multi_{item['Müşteri']}")
+                        if is_ready_m and label_multi not in st.session_state.ready_packages:
+                            st.session_state.ready_packages.append(label_multi)
             else:
                 st.info("Karma paket yok.")
-
     else:
         st.warning("İşleme alınmış sipariş yok.")
-
-# -------------------------------------------------
-# YENİLEME BUTONU
-# -------------------------------------------------
-if st.sidebar.button("🔄 Verileri Yenile"):
-    st.cache_data.clear()
-    st.rerun()
