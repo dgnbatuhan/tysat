@@ -5,10 +5,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- Sayfa Yapılandırması ---
-st.set_page_config(page_title="Trendyol Tüm Siparişler Paneli", layout="wide")
+st.set_page_config(page_title="Trendyol İşleme Alınanlar", layout="wide")
 
-# --- API Bilgileri (Streamlit Secrets üzerinden) ---
-# Not: Localde çalıştırırken .streamlit/secrets.toml dosyasına yazmalısınız.
+# --- API Bilgileri ---
 SELLER_ID = st.secrets["SELLER_ID"]
 API_KEY = st.secrets["API_KEY"]
 API_SECRET = st.secrets["API_SECRET"]
@@ -18,18 +17,16 @@ def get_auth_header():
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     return {"Authorization": f"Basic {encoded_auth}", "User-Agent": f"{SELLER_ID}-Integration"}
 
-@st.cache_data(ttl=60) # Veriyi daha sık güncellemek için 1 dakikaya indirdim
+@st.cache_data(ttl=60)
 def fetch_orders():
     end_dt = datetime.now()
-    # Geriye dönük 15 günü çekelim ki kargolanmamış tüm siparişleri yakalayalım
-    start_dt = end_dt - timedelta(days=15) 
+    start_dt = end_dt - timedelta(days=30) # İşleme alınanlar daha eski olabilir
     
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
     
-    # STATUS DEĞİŞİKLİĞİ: Sadece 'Created' değil, kargolanmamış tüm durumlar
-    # Created: Yeni, Approved: Onaylanmış, Invoiced: Faturalanmış
+    # SADECE İŞLEME ALINANLAR (Picking: Toplanıyor, Invoiced: Faturalandı/Hazırlanıyor)
     params = {
-        "status": "Created,Approved,Invoiced", 
+        "status": "Picking,Invoiced", 
         "startDate": str(int(start_dt.timestamp() * 1000)),
         "endDate": str(int(end_dt.timestamp() * 1000)),
         "size": 200
@@ -39,36 +36,30 @@ def fetch_orders():
         response = requests.get(url, params=params, headers=get_auth_header())
         if response.status_code == 200:
             return response.json().get("content", [])
-        else:
-            st.error(f"API Hatası: {response.status_code}")
-            return []
+        return []
     except Exception as e:
-        st.error(f"Bağlantı Hatası: {e}")
+        st.error(f"Hata: {e}")
         return []
 
 # --- Veri İşleme ---
 orders = fetch_orders()
 
-st.title("📦 Tüm Hazırlanacak Siparişler (Genel Liste)")
-st.caption(f"Toplam {len(orders)} adet paket kargolanmayı bekliyor.")
+st.title("🛠️ İşleme Alınan (Hazırlanıyor) Siparişler")
+st.info(f"Şu anda paketleme masasında olması gereken toplam {len(orders)} sipariş var.")
 
 if orders:
     single_items = []
     multi_items = []
 
     for order in orders:
-        # Müşteri adı
-        first_name = order.get('shipmentAddress', {}).get('firstName', '')
-        last_name = order.get('shipmentAddress', {}).get('lastName', '')
-        customer = f"{first_name} {last_name}".strip()
-        
-        # Sipariş Durumu (Created, Approved vb.)
-        status = order.get("status")
-        status_tr = "Yeni" if status == "Created" else "Onaylı/Hazırlanıyor"
-        
+        customer = f"{order.get('shipmentAddress', {}).get('firstName', '')} {order.get('shipmentAddress', {}).get('lastName', '')}"
         lines = order.get("lines", [])
-        total_qty_in_package = sum(item.get("quantity") for item in lines)
+        total_qty = sum(item.get("quantity") for item in lines)
         
+        # Statü bilgisini Türkçeleştirelim
+        current_status = order.get("status")
+        status_label = "✅ Faturalandı" if current_status == "Invoiced" else "🏗️ Toplanıyor"
+
         if len(lines) == 1:
             line = lines[0]
             single_items.append({
@@ -76,54 +67,49 @@ if orders:
                 "Ürün": line.get("productName"),
                 "Barkod": line.get("barcode"),
                 "Adet": line.get("quantity"),
-                "Durum": status_tr,
-                "Detay": f"{customer} ({status_tr}) - {line.get('quantity')}'li paket"
+                "Detay": f"{customer} - {line.get('quantity')}'li paket ({status_label})"
             })
         else:
             package_summary = " + ".join([f"{item.get('quantity')} adet {item.get('productName')}" for item in lines])
             multi_items.append({
                 "Müşteri": customer,
                 "İçerik": package_summary,
-                "Toplam Ürün": total_qty_in_package,
-                "Durum": status_tr,
-                "Detay": f"{customer} - Karma Paket ({total_qty_in_package} Ürün)"
+                "Toplam": total_qty,
+                "Durum": status_label
             })
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.header("🛒 Tek Çeşit Ürünler")
+        st.subheader("📦 Tekli Ürün Paketleri")
         if single_items:
             df_s = pd.DataFrame(single_items)
             summary_s = df_s.groupby(["Ürün", "Barkod"]).agg(
                 Toplam_Adet=('Adet', 'sum'),
-                Paket_Sayisi=('Adet', 'count'),
                 Musteri_Listesi=('Detay', lambda x: " \n ".join(x))
             ).reset_index()
 
             for _, row in summary_s.iterrows():
-                with st.expander(f"🔵 {row['Toplam_Adet']} Adet | {row['Ürün']}"):
+                with st.expander(f"📦 {row['Toplam_Adet']} Adet - {row['Ürün']}"):
                     st.write(f"**Barkod:** `{row['Barkod']}`")
-                    st.markdown("**Paket Dağılımı:**")
-                    st.info(row['Musteri_Listesi'])
+                    st.text(row['Musteri_Listesi'])
         else:
-            st.write("Sipariş bulunamadı.")
+            st.write("İşleme alınan tekli sipariş yok.")
 
     with col2:
-        st.header("🎁 Karma Paketler")
+        st.subheader("🎁 Karma Paketler")
         if multi_items:
             for item in multi_items:
                 with st.container(border=True):
-                    st.subheader(item["Müşteri"])
-                    st.write(f"🏷️ **Durum:** {item['Durum']}")
-                    st.write(f"📝 **İçerik:** {item['İçerik']}")
-                    st.write(f"🔢 **Miktar:** {item['Toplam Ürün']} parça")
+                    st.write(f"👤 **{item['Müşteri']}**")
+                    st.caption(item["Durum"])
+                    st.write(f"📝 {item['İçerik']}")
+                    st.write(f"🔢 Toplam: {item['Toplam']} ürün")
         else:
-            st.write("Karma sipariş bulunamadı.")
+            st.write("İşleme alınan karma sipariş yok.")
 else:
-    st.success("Tüm siparişler paketlenmiş veya gönderilmiş!")
+    st.warning("İşleme alınmış (Picking veya Invoiced) bir sipariş bulunamadı.")
 
-# Manuel Yenileme
-if st.sidebar.button("🔄 Verileri Yenile"):
+if st.sidebar.button("🔄 Listeyi Yenile"):
     st.cache_data.clear()
     st.rerun()
