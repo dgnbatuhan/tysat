@@ -5,7 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- Sayfa Yapılandırması ---
-st.set_page_config(page_title="Trendyol Paketleme Masası", layout="wide")
+st.set_page_config(page_title="Trendyol Hazırlık Paneli", layout="wide")
 
 # --- API Bilgileri ---
 SELLER_ID = st.secrets["SELLER_ID"]
@@ -17,19 +17,18 @@ def get_auth_header():
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     return {"Authorization": f"Basic {encoded_auth}", "User-Agent": f"{SELLER_ID}-Integration"}
 
-@st.cache_data(ttl=30)
-def fetch_all_active_orders():
+@st.cache_data(ttl=10) # Hızlı güncelleme için 10 saniye
+def fetch_picking_orders():
+    # Tarih aralığını çok geniş tutuyoruz ki hazırlıkta bekleyen eski siparişler kaçmasın
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=30)
+    start_dt = end_dt - timedelta(days=45) # Son 45 günün siparişleri
     
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
     
-    # TÜM AKTİF STATÜLER: Yeni, Onaylı, Hazırlanıyor, Faturalandı
-    # Bu liste kargoya verilmemiş her şeyi kapsar.
-    all_statuses = "Created,Approved,Picking,Invoiced"
-    
+    # SADECE PANELDE "HAZIRLANIYOR" BUTONUNA BASILMIŞ OLANLAR
+    # Picking = Hazırlanıyor, Invoiced = Faturalandı
     params = {
-        "status": all_statuses, 
+        "status": "Picking,Invoiced", 
         "startDate": str(int(start_dt.timestamp() * 1000)),
         "endDate": str(int(end_dt.timestamp() * 1000)),
         "size": 200
@@ -39,17 +38,15 @@ def fetch_all_active_orders():
         response = requests.get(url, params=params, headers=get_auth_header())
         if response.status_code == 200:
             return response.json().get("content", [])
-        else:
-            st.error(f"API Hatası: {response.status_code}")
-            return []
-    except Exception as e:
-        st.error(f"Bağlantı Hatası: {e}")
+        return []
+    except:
         return []
 
 # --- Veri İşleme ---
-orders = fetch_all_active_orders()
+orders = fetch_picking_orders()
 
-st.title("📦 Sipariş Hazırlama ve Paketleme Listesi")
+st.title("🛠️ Sadece İşleme Alınanlar (Hazırlanıyor)")
+st.write(f"Şu an paketleme masasında bekleyen **{len(orders)}** adet işleme alınmış sipariş var.")
 
 if orders:
     single_items = []
@@ -60,14 +57,9 @@ if orders:
         lines = order.get("lines", [])
         total_qty = sum(item.get("quantity") for item in lines)
         
-        # Trendyol'dan gelen orijinal statü
-        raw_status = order.get("status")
-        
-        # Statüye göre renkli etiketler
-        if raw_status == "Created": s_label = "🟡 Yeni"
-        elif raw_status == "Picking": s_label = "🔵 Hazırlanıyor"
-        elif raw_status == "Invoiced": s_label = "🟢 Faturalandı"
-        else: s_label = f"⚪ {raw_status}"
+        # Statü bilgisini çekelim
+        raw_s = order.get("status")
+        statu_badge = "🔵 Hazırlanıyor" if raw_s == "Picking" else "🟢 Faturalandı"
 
         if len(lines) == 1:
             line = lines[0]
@@ -76,7 +68,7 @@ if orders:
                 "Ürün": line.get("productName"),
                 "Barkod": line.get("barcode"),
                 "Adet": line.get("quantity"),
-                "Detay": f"{customer} - {line.get('quantity')}'li paket ({s_label})"
+                "Detay": f"👤 {customer} - {line.get('quantity')}'li paket ({statu_badge})"
             })
         else:
             package_summary = " + ".join([f"{item.get('quantity')} adet {item.get('productName')}" for item in lines])
@@ -84,9 +76,10 @@ if orders:
                 "Müşteri": customer,
                 "İçerik": package_summary,
                 "Toplam": total_qty,
-                "Durum": s_label
+                "Durum": statu_badge
             })
 
+    # --- Arayüz Sütunları ---
     col1, col2 = st.columns(2)
 
     with col1:
@@ -95,32 +88,32 @@ if orders:
             df_s = pd.DataFrame(single_items)
             summary_s = df_s.groupby(["Ürün", "Barkod"]).agg(
                 Toplam_Adet=('Adet', 'sum'),
-                Musteri_Listesi=('Detay', lambda x: " \n ".join(x))
+                Liste=('Detay', lambda x: " \n ".join(x))
             ).reset_index()
 
             for _, row in summary_s.iterrows():
-                with st.expander(f"📦 {row['Toplam_Adet']} Adet - {row['Ürün']}"):
+                with st.expander(f"📦 {row['Toplam_Adet']} ADET - {row['Ürün']}"):
                     st.write(f"**Barkod:** `{row['Barkod']}`")
                     st.markdown("---")
-                    st.text(row['Musteri_Listesi'])
+                    st.text(row['Liste'])
         else:
-            st.write("Tekli ürün içeren sipariş bulunamadı.")
+            st.info("İşleme alınmış tekli ürün bulunamadı.")
 
     with col2:
         st.header("🎁 Karma Paketler")
         if multi_items:
             for item in multi_items:
                 with st.container(border=True):
-                    st.write(f"👤 **{item['Müşteri']}**")
+                    st.subheader(item["Müşteri"])
                     st.write(f"Durum: {item['Durum']}")
                     st.write(f"📝 {item['İçerik']}")
                     st.write(f"🔢 Toplam: {item['Toplam']} ürün")
         else:
-            st.write("Karma paket içeren sipariş bulunamadı.")
+            st.info("İşleme alınmış karma paket bulunamadı.")
 else:
-    st.warning("⚠️ Şu anda kargolanmayı bekleyen aktif bir sipariş bulunamadı.")
-    st.info("Eğer panelde sipariş varsa, 'Kargoya Verildi' veya 'İptal' edilip edilmediğini kontrol edin.")
+    st.warning("⚠️ 'Hazırlanıyor' aşamasında sipariş bulunamadı.")
+    st.write("Lütfen Trendyol Panelinde 'Hazırlanıyor' kısmında sipariş olduğundan emin olun.")
 
-if st.sidebar.button("🔄 Verileri Güncelle"):
+if st.sidebar.button("🔄 Verileri Yenile"):
     st.cache_data.clear()
     st.rerun()
