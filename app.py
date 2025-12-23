@@ -36,7 +36,7 @@ def get_auth_header():
 @st.cache_data(ttl=10)
 def fetch_orders(status):
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=45)
+    start_dt = end_dt - timedelta(days=5)
 
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
 
