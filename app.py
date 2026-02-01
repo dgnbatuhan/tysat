@@ -5,166 +5,133 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Trendyol Sipariş Paneli", layout="wide")
+st.set_page_config(page_title="3D Yazıcı Üretim Paneli", layout="wide")
 
-# --- API BİLGİLERİ ---
+# --- CSS: Makine Kartları İçin ---
+st.markdown("""
+    <style>
+    .printer-card {
+        border: 2px solid #4B4B4B;
+        border-radius: 10px;
+        padding: 10px;
+        background-color: #262730;
+        margin-bottom: 10px;
+    }
+    .color-indicator {
+        height: 20px;
+        width: 20px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 10px;
+        border: 1px solid white;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- API BİLGİLERİ (Secrets'tan gelir) ---
 SELLER_ID = st.secrets["SELLER_ID"]
 API_KEY = st.secrets["API_KEY"]
 API_SECRET = st.secrets["API_SECRET"]
 
-# --- AUTH HEADER ---
+# --- SABİTLER ---
+MAKINE_SAYISI = 8
+RENK_HARITASI = {
+    "Siyah": "#000000", "Beyaz": "#FFFFFF", "Kırmızı": "#FF0000", 
+    "Mavi": "#0000FF", "Gri": "#808080", "Altın": "#D4AF37"
+}
+
+# --- SESSION STATE (Üretim Takibi) ---
+if "makine_durumu" not in st.session_state:
+    st.session_state.makine_durumu = {f"Makine {i+1}": {"is": None, "renk": "Boş"} for i in range(MAKINE_SAYISI)}
+
+# --- YARDIMCI FONKSİYONLAR ---
 def get_auth_header():
     auth_str = f"{API_KEY}:{API_SECRET}"
     encoded_auth = base64.b64encode(auth_str.encode()).decode()
     return {"Authorization": f"Basic {encoded_auth}", "User-Agent": f"{SELLER_ID}-Integration"}
 
-# --- SİPARİŞ ÇEKME ---
-@st.cache_data(ttl=10)
+def renk_bul(urun_adi):
+    """Ürün adından renk tahmin eder"""
+    for renk in RENK_HARITASI.keys():
+        if renk.lower() in urun_adi.lower():
+            return renk
+    return "Belirsiz"
+
+@st.cache_data(ttl=60)
 def fetch_orders(status):
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=5) # Aralığı biraz genişlettik
+    start_dt = end_dt - timedelta(days=3)
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/orders"
-    params = {
-        "status": status,
-        "startDate": int(start_dt.timestamp() * 1000),
-        "endDate": int(end_dt.timestamp() * 1000),
-        "size": 200
-    }
+    params = {"status": status, "startDate": int(start_dt.timestamp() * 1000), "endDate": int(end_dt.timestamp() * 1000)}
     try:
         response = requests.get(url, headers=get_auth_header(), params=params)
         return response.json().get("content", []) if response.status_code == 200 else []
-    except:
-        return []
+    except: return []
 
-# --- SESSION STATE (Hazır Paket Takibi İçin) ---
-if "ready_packages" not in st.session_state:
-    st.session_state.ready_packages = []
-
-# --- SIDEBAR (HAZIR PAKETLER LİSTESİ) ---
+# --- SIDEBAR: MAKİNE DURUMLARI (ANLIK) ---
 with st.sidebar:
-    st.header("✅ Hazır Paketler")
-    if st.session_state.ready_packages:
-        for p in st.session_state.ready_packages:
-            st.success(f"📦 {p}")
-        if st.button("🗑️ Listeyi Temizle"):
-            st.session_state.ready_packages = []
-            st.rerun()
-    else:
-        st.info("Henüz işaretlenmiş paket yok.")
-    
-    st.divider()
-    if st.button("🔄 Verileri Yenile", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    st.header("🤖 Makinelerin Durumu")
+    for m_name, m_info in st.session_state.makine_durumu.items():
+        with st.container():
+            st.markdown(f"**{m_name}**")
+            if m_info["is"]:
+                st.caption(f"🔥 Çalışıyor: {m_info['is']}")
+                st.markdown(f"<span class='color-indicator' style='background-color:{RENK_HARITASI.get(m_info['renk'], '#444')}'></span> {m_info['renk']}", unsafe_allow_html=True)
+                if st.button(f"Bitir", key=f"finish_{m_name}"):
+                    st.session_state.makine_durumu[m_name] = {"is": None, "renk": "Boş"}
+                    st.rerun()
+            else:
+                st.success("✅ Müsait")
+            st.divider()
 
-# --- ANA BAŞLIK ---
-st.title("📦 Trendyol Sipariş Yönetim Paneli")
+# --- ANA PANEL ---
+st.title("🚀 3D Yazıcı Üretim & Sipariş Otomasyonu")
 
-tab_new, tab_processing = st.tabs(["🆕 Yeni Gelenler (Özet)", "🛠️ İşleme Alınanlar"])
+# Verileri Çek
+orders = fetch_orders("Created,Picking,Invoiced")
 
-# -------------------------------------------------
-# 1. SEKME: YENİ GELENLER (ÖZET GÖRÜNÜM)
-# -------------------------------------------------
-with tab_new:
-    new_orders = fetch_orders("Created")
-    if new_orders:
-        new_list = []
-        for o in new_orders:
-            for l in o.get("lines", []):
-                new_list.append({
-                    "Ürün": l.get("productName"),
-                    "Barkod": l.get("barcode"),
-                    "Adet": l.get("quantity")
-                })
-        
-        df_new = pd.DataFrame(new_list)
-        summary_new = df_new.groupby(["Ürün", "Barkod"]).agg(Toplam=("Adet", "sum"), Siparis_Sayisi=("Adet", "count")).reset_index()
-        
-        st.subheader(f"📢 Toplam {summary_new['Toplam'].sum()} Ürün Bekliyor")
-        
-        for _, row in summary_new.iterrows():
-            with st.container(border=True):
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"**{row['Ürün']}**")
-                c1.caption(f"Barkod: {row['Barkod']}")
-                c2.subheader(f"{row['Toplam']} Adet")
-    else:
-        st.info("Yeni gelen sipariş yok.")
+# --- ÖZET METRİKLER ---
+c1, c2, c3 = st.columns(3)
+c1.metric("Bekleyen Toplam Sipariş", len(orders))
+c2.metric("Dolu Makine", sum(1 for v in st.session_state.makine_durumu.values() if v["is"]))
+c3.metric("Boş Makine", MAKINE_SAYISI - sum(1 for v in st.session_state.makine_durumu.values() if v["is"]))
 
-# -------------------------------------------------
-# 2. SEKME: İŞLEME ALINANLAR (DETAY + CHECKBOX)
-# -------------------------------------------------
-with tab_processing:
-    orders = fetch_orders("Picking,Invoiced")
-    st.subheader(f"🛠️ Paketlenecek Siparişler ({len(orders)})")
+st.divider()
 
-    if orders:
-        single_items = []
-        multi_items = []
+# --- SİPARİŞ ATAMA ALANI ---
+st.subheader("📋 Üretim Bekleyenler")
 
-        for order in orders:
-            customer = f"{order.get('shipmentAddress', {}).get('firstName','')} {order.get('shipmentAddress', {}).get('lastName','')}"
-            lines = order.get("lines", [])
-            status = order.get("status")
-            badge = "🔵 Hazırlanıyor" if status == "Picking" else "🟢 Faturalandı"
+if orders:
+    for o in orders:
+        customer = f"{o.get('shipmentAddress', {}).get('firstName','')} {o.get('shipmentAddress', {}).get('lastName','')}"
+        for line in o.get("lines", []):
+            urun = line.get("productName")
+            renk = renk_bul(urun)
             
-            if len(lines) == 1:
-                line = lines[0]
-                single_items.append({
-                    "Ürün": line.get("productName"),
-                    "Barkod": line.get("barcode"),
-                    "Adet": line.get("quantity"),
-                    "Müşteri": customer,
-                    "Statü": badge
-                })
-            else:
-                package_summary = " + ".join([f"{i.get('quantity')} x {i.get('productName')}" for i in lines])
-                multi_items.append({
-                    "Müşteri": customer,
-                    "İçerik": package_summary,
-                    "Durum": badge
-                })
-
-        col1, col2 = st.columns(2)
-
-        # --- TEKLİ ÜRÜNLER (GRUPLU) ---
-        with col1:
-            st.header("🛒 Tekli Paketler")
-            if single_items:
-                df_p = pd.DataFrame(single_items)
-                summary_p = df_p.groupby(["Ürün", "Barkod"]).agg(
-                    Toplam=("Adet", "sum"),
-                    Detaylar=("Müşteri", list),
-                    Adetler=("Adet", list)
-                ).reset_index()
-
-                for _, row in summary_p.iterrows():
-                    with st.expander(f"📦 {row['Toplam']} Adet - {row['Ürün']}"):
-                        st.caption(f"Barkod: {row['Barkod']}")
-                        for m, a in zip(row['Detaylar'], row['Adetler']):
-                            label = f"{m} ({a} Adet)"
-                            # Checkbox ile hazır paket takibi
-                            is_ready = st.checkbox(label, key=f"check_{m}_{row['Barkod']}")
-                            if is_ready and label not in st.session_state.ready_packages:
-                                st.session_state.ready_packages.append(label)
-            else:
-                st.info("Tekli paket yok.")
-
-        # --- KARMA PAKETLER ---
-        with col2:
-            st.header("🎁 Karma Paketler")
-            if multi_items:
-                for item in multi_items:
-                    with st.container(border=True):
-                        st.subheader(item["Müşteri"])
-                        st.write(item["Durum"])
-                        st.info(f"📝 {item['İçerik']}")
-                        
-                        label_multi = f"{item['Müşteri']} (Karma)"
-                        is_ready_m = st.checkbox("Paket Hazır", key=f"multi_{item['Müşteri']}")
-                        if is_ready_m and label_multi not in st.session_state.ready_packages:
-                            st.session_state.ready_packages.append(label_multi)
-            else:
-                st.info("Karma paket yok.")
-    else:
-        st.warning("İşleme alınmış sipariş yok.")
+            with st.expander(f"📦 {urun} - ({customer})", expanded=True):
+                col_info, col_assign = st.columns([3, 2])
+                
+                with col_info:
+                    st.write(f"**Müşteri:** {customer}")
+                    st.write(f"**Renk:** {renk}")
+                    # G-Code Eşleştirme (Burada barkoda göre bir sözlükten gcode ismi çekebilirsiniz)
+                    st.warning(f"📄 G-Code: {line.get('barcode')}.gcode")
+                
+                with col_assign:
+                    # Sadece boş makineleri listele
+                    available_machines = [m for m, v in st.session_state.makine_durumu.items() if v["is"] is None]
+                    
+                    if available_machines:
+                        selected_m = st.selectbox("Makine Seç", available_machines, key=f"sel_{line.get('id')}")
+                        if st.button("Üretime Gönder 🚀", key=f"btn_{line.get('id')}"):
+                            # Makineyi doldur
+                            st.session_state.makine_durumu[selected_m] = {
+                                "is": f"{customer} - {urun[:20]}...",
+                                "renk": renk
+                            }
+                            st.toast(f"{selected_m} üzerine iş atandı!")
+                            st.rerun()
+                    else:
+                        st.error("Tüm makineler dolu!")
+else:
+    st.info("Şu an üretim bekleyen yeni sipariş bulunamadı.")
